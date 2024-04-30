@@ -1,57 +1,89 @@
 import torch
+from torch.utils.data import DataLoader, Dataset, random_split
 from torch.nn.utils.rnn import pad_sequence
-from sklearn.model_selection import train_test_split
+from datasets import load_dataset
+import random
+import nltk
 from nltk.tokenize import word_tokenize
 from nltk.stem import PorterStemmer
-import nltk
+
 nltk.download('punkt')
 
-def build_dataset(config):
-    data_path = './data/dialogs.txt'
+class TextDataset(Dataset):
+    def __init__(self, texts, vocab, stemmer):
+        self.vocab = vocab
+        self.stemmer = stemmer
+        self.pairs = [self.process_text(text) for text in texts]
 
-    with open(data_path, 'r', encoding='utf-8') as file:
-        lines = file.readlines()
+    def process_text(self, text):
+        tokens = word_tokenize(text.lower())
+        indices = [self.vocab.get(self.stemmer.stem(token), self.vocab['<unk>']) for token in tokens]
+        # Assuming next-word prediction; adjust as necessary for your specific task
+        inputs = torch.tensor(indices[:-1], dtype=torch.long)
+        targets = torch.tensor(indices[1:], dtype=torch.long)
+        return inputs, targets
 
-    input_seqs = []
-    target_seqs = []
-    for line in lines:
-        input_seq, target_seq = line.strip().split('\t')
-        input_seqs.append(input_seq)
-        target_seqs.append(target_seq)
+    def __len__(self):
+        return len(self.pairs)
 
+    def __getitem__(self, idx):
+        return self.pairs[idx]
+
+def collate_batch(batch, word_to_index):
+    inputs, targets = zip(*batch)
+    inputs_padded = pad_sequence(inputs, batch_first=True, padding_value=word_to_index['<pad>'])
+    targets_padded = pad_sequence(targets, batch_first=True, padding_value=word_to_index['<pad>'])
+    return inputs_padded, targets_padded
+
+def build_vocab(texts):
     stemmer = PorterStemmer()
-
     vocab_set = set()
-    for seq in input_seqs + target_seqs:
-        tokens = word_tokenize(seq.lower())  # Tokenization and lowercasing
-        stemmed_tokens = [stemmer.stem(token) for token in tokens]  # Stemming
+    for text in texts:
+        tokens = word_tokenize(text.lower())
+        stemmed_tokens = [stemmer.stem(token) for token in tokens]
         vocab_set.update(stemmed_tokens)
     vocab = ['<sos>', '<eos>', '<unk>', '<pad>'] + sorted(list(vocab_set))
-    word_to_index = {word: index for index, word in enumerate(vocab)}
+    return {word: index for index, word in enumerate(vocab)}
 
-    input_data_indices = [[word_to_index.get(stemmer.stem(token), word_to_index['<unk>']) for token in word_tokenize(seq.lower())] for seq in input_seqs]
-    target_data_indices = [[word_to_index.get(stemmer.stem(token), word_to_index['<unk>']) for token in word_tokenize(seq.lower())] for seq in target_seqs]
+def load_wikipedia_subset(percentage=0.01, cache_dir="./cache"):
+    dataset = load_dataset('wikipedia', '20220301.en', split='train', cache_dir=cache_dir)
+    sample_size = int(len(dataset) * percentage)
+    random.seed(42)
+    sampled_indices = random.sample(range(len(dataset)), sample_size)
+    sampled_texts = [dataset[i]['text'] for i in sampled_indices]
+    return sampled_texts
 
-    input_tensor_sequences = [torch.tensor(seq) for seq in input_data_indices]
-    target_tensor_sequences = [torch.tensor(seq) for seq in target_data_indices]
+def prepare_data_loaders(texts, config):
+    vocab = build_vocab(texts)
+    stemmer = PorterStemmer()
+    dataset = TextDataset(texts, vocab, stemmer)
+    total = len(dataset)
+    train_size = int(config['split'][0] * total)
+    val_size = int(config['split'][1] * total)
+    test_size = total - train_size - val_size
 
-    padded_input_sequences = pad_sequence(input_tensor_sequences, batch_first=True, padding_value=word_to_index['<pad>'])
-    padded_target_sequences = pad_sequence(target_tensor_sequences, batch_first=True, padding_value=word_to_index['<pad>'])
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+    collate_fn = lambda batch: collate_batch(batch, vocab)
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, collate_fn=collate_fn)
 
-    train_input, test_input, train_target, test_target = train_test_split(
-        padded_input_sequences, padded_target_sequences, train_size=config['split'][0], random_state=42
-    )
-    val_split = config['split'][1] / (config['split'][1] + config['split'][2])
-    train_input, val_input, train_target, val_target = train_test_split(
-        train_input, train_target, test_size=val_split, random_state=42
-    )
+    return train_loader, val_loader, test_loader, vocab
 
-    train_dataset = torch.utils.data.TensorDataset(train_input, train_target)
-    val_dataset = torch.utils.data.TensorDataset(val_input, val_target)
-    test_dataset = torch.utils.data.TensorDataset(test_input, test_target)
+def main():
+    config = {
+        'split': [0.8, 0.1, 0.1],
+        'embed_dim': 512,
+        'hidden_dim': 512,
+        'epochs': 10,
+        'learning_rate': 1e-3,
+        'batch_size': 32,
+    }
+    
+    wiki_texts = load_wikipedia_subset(0.01)
+    train_loader, val_loader, test_loader, word_to_index = prepare_data_loaders(wiki_texts, config)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False)
+    print(f"Datasets loaded: Train={len(train_loader.dataset)}, Val={len(val_loader.dataset)}, Test={len(test_loader.dataset)}")
 
-    return train_loader, val_loader, test_loader, word_to_index
+if __name__ == "__main__":
+    main()

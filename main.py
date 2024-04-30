@@ -3,11 +3,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from lstmmodel import LSTMModel 
-from utils import build_dataset
+from utils import load_wikipedia_subset, prepare_data_loaders
 from configs import LSTM_CONFIG
 
 def main(model):
-    train_loader, test_loader, val_loader, vocab = build_dataset(LSTM_CONFIG)
+    wiki_texts = load_wikipedia_subset(0.01)  # Load 1% of the Wikipedia dataset
+    train_loader, val_loader, test_loader, vocab = prepare_data_loaders(wiki_texts, LSTM_CONFIG)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     embedding_dim = LSTM_CONFIG['embed_dim']
     hidden_size = LSTM_CONFIG['hidden_dim']
